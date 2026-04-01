@@ -20,10 +20,16 @@ const PGN_ENGINE_RAPID = 127488;
 const PGN_TEMPERATURE = 130312;
 
 function readUint16LE(buf: Uint8Array, offset: number): number {
+  if (offset + 1 >= buf.length) {
+    throw new RangeError(`Buffer overflow: need offset ${offset + 1}, have ${buf.length}`);
+  }
   return buf[offset] | (buf[offset + 1] << 8);
 }
 
 function decodeEngineRapid(frame: NmeaFrame): DecodedValue {
+  if (frame.data.length < 3) {
+    throw new RangeError(`EngineRapid requires >= 3 bytes, got ${frame.data.length}`);
+  }
   const instance = frame.data[0];
   const rpmRaw = readUint16LE(frame.data, 1);
   const rpm = rpmRaw * 0.25;
@@ -31,6 +37,9 @@ function decodeEngineRapid(frame: NmeaFrame): DecodedValue {
 }
 
 function decodeTemperature(frame: NmeaFrame): DecodedValue {
+  if (frame.data.length < 4) {
+    throw new RangeError(`Temperature requires >= 4 bytes, got ${frame.data.length}`);
+  }
   const source = frame.data[1];
   const tempRaw = readUint16LE(frame.data, 2);
   const tempKelvin = tempRaw * 0.01;
