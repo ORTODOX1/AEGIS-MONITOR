@@ -87,6 +87,10 @@ wss.on('connection', (ws: WebSocket) => {
     }
   }, 1000);
 
+  ws.on('error', (err) => {
+    console.error('[AEGIS-WS] Error:', err.message);
+  });
+
   ws.on('close', () => {
     clearInterval(interval);
     console.log('[AEGIS-WS] Client disconnected');

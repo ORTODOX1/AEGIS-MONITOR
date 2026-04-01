@@ -33,6 +33,9 @@ export const useVesselStore = create<VesselState>((set) => ({
 
   updateEngineData: (index, data) =>
     set((state) => {
+      if (index < 0 || index >= state.engines.length) {
+        return state;
+      }
       const engines = [...state.engines];
       if (engines[index]) {
         engines[index] = { ...engines[index], ...data };
