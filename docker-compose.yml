@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    networks:
+      - aegis-net
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    command: ["node", "--import", "tsx", "server/index.ts"]
+    ports:
+      - "3001:3001"
+    environment:
+      PORT: "3001"
+      DATABASE_URL: "postgresql://aegis:aegis_secret@timescaledb:5432/aegis_monitor"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - aegis-net
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: aegis_secret
+      POSTGRES_DB: aegis_monitor
+    volumes:
+      - tsdb-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis_monitor"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - aegis-net
+
+volumes:
+  tsdb-data:
+
+networks:
+  aegis-net:
+    driver: bridge
