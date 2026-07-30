@@ -1,0 +1,32 @@
+# Production overlay: same two application services, restarted automatically and
+# without the database container (the server does not use one yet).
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - aegis-net
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    expose:
+      - "3001"
+    environment:
+      PORT: "3001"
+    restart: unless-stopped
+    networks:
+      - aegis-net
+
+networks:
+  aegis-net:
+    driver: bridge

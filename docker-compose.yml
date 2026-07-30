@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   frontend:
     build:
@@ -12,34 +10,33 @@ services:
     networks:
       - aegis-net
 
+  # Mock data server: generated telemetry only, no persistence.
   backend:
     build:
       context: .
       dockerfile: Dockerfile.server
-    command: ["node", "--import", "tsx", "server/index.ts"]
     ports:
       - "3001:3001"
     environment:
       PORT: "3001"
-      DATABASE_URL: "postgresql://aegis:aegis_secret@timescaledb:5432/aegis_monitor"
-    depends_on:
-      timescaledb:
-        condition: service_healthy
     networks:
       - aegis-net
 
+  # Provisioned for the planned persistence layer. Nothing connects to it yet --
+  # server/index.ts holds no database client. Credentials come from .env
+  # (see .env.example).
   timescaledb:
     image: timescale/timescaledb:latest-pg16
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: aegis
-      POSTGRES_PASSWORD: aegis_secret
-      POSTGRES_DB: aegis_monitor
+      POSTGRES_USER: ${POSTGRES_USER:-aegis}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-aegis_monitor}
     volumes:
       - tsdb-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis_monitor"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aegis} -d ${POSTGRES_DB:-aegis_monitor}"]
       interval: 5s
       timeout: 3s
       retries: 10
