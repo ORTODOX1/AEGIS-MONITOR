@@ -1,3 +1,12 @@
+/**
+ * AEGIS-MONITOR mock data server.
+ *
+ * This is a development stand-in for a shipboard data gateway. It does NOT talk
+ * to a CAN bus, a PLC or a database -- every value below is randomly generated
+ * in-process and nothing is persisted. Its only job is to give the dashboard a
+ * realistic-looking stream to render against while the real acquisition layer
+ * does not exist yet.
+ */
 import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'node:http';
@@ -14,6 +23,8 @@ interface SensorSnapshot {
   coolantTempC: number;
   fuelRateLph: number;
   exhaustTempC: number;
+  speedKnots: number;
+  shaftPowerKw: number;
 }
 
 function generateMockSensor(): SensorSnapshot {
@@ -22,12 +33,16 @@ function generateMockSensor(): SensorSnapshot {
     engineRpm: 95 + Math.random() * 20,
     oilPressureKpa: 380 + Math.random() * 40,
     coolantTempC: 78 + Math.random() * 8,
-    fuelRateLph: 130 + Math.random() * 30,
+    // Fuel flow and shaft power are kept mutually consistent so that the SFOC
+    // the dashboard derives from them lands in a realistic 160-200 g/kWh band.
+    fuelRateLph: 1100 + Math.random() * 150,
     exhaustTempC: 320 + Math.random() * 40,
+    speedKnots: 13.5 + Math.random() * 1.5,
+    shaftPowerKw: 6200 + Math.random() * 400,
   };
 }
 
-// REST endpoints
+// REST endpoints -- all responses are generated, none are read from storage.
 app.get('/api/v1/vessels', (_req, res) => {
   res.json([
     { vesselId: 'aegis-001', name: 'M/V AEGIS PIONEER', imo: 'IMO9876543' },
@@ -56,7 +71,7 @@ app.get('/api/v1/vessels/:vesselId/history', (req, res) => {
     pgn: 61444,
     value: 95 + Math.random() * 20,
     unit: 'RPM',
-    timestamp: from + i * step,
+    timestamp: Math.round(from + i * step),
   }));
   res.json(data);
 });
@@ -74,7 +89,7 @@ app.get('/api/v1/vessels/:vesselId/alarms', (req, res) => {
   res.json(alarms);
 });
 
-// WebSocket server for real-time sensor streaming
+// WebSocket server streaming the generated snapshots once per second.
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
@@ -98,6 +113,6 @@ wss.on('connection', (ws: WebSocket) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`[AEGIS] Server running on http://localhost:${PORT}`);
+  console.log(`[AEGIS] Mock data server running on http://localhost:${PORT}`);
   console.log(`[AEGIS] WebSocket available at ws://localhost:${PORT}/ws`);
 });
