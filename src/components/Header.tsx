@@ -8,7 +8,7 @@ interface HeaderProps {
   onTabChange: (tab: string) => void;
 }
 
-const TABS = ['Overview', 'Voyage', 'Alarms', 'Diagnostics'] as const;
+const TABS = ['Overview', 'Voyage', 'Alarms'] as const;
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
   connecting: 'CONNECTING',

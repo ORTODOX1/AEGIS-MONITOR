@@ -1,5 +1,8 @@
 import React from 'react';
 
+/** 'high' alarms when the value rises (temperatures), 'low' when it falls (pressures). */
+export type GaugeDirection = 'high' | 'low';
+
 interface GaugeWidgetProps {
   label: string;
   value: number;
@@ -8,23 +11,34 @@ interface GaugeWidgetProps {
   unit: string;
   warningThreshold: number;
   criticalThreshold: number;
+  direction?: GaugeDirection;
 }
 
-function getArcColor(value: number, warning: number, critical: number): string {
+function getArcColor(
+  value: number,
+  warning: number,
+  critical: number,
+  direction: GaugeDirection,
+): string {
+  if (direction === 'low') {
+    if (value <= critical) return '#ef4444';
+    if (value <= warning) return '#eab308';
+    return '#22c55e';
+  }
   if (value >= critical) return '#ef4444';
   if (value >= warning) return '#eab308';
   return '#22c55e';
 }
 
 const GaugeWidget: React.FC<GaugeWidgetProps> = ({
-  label, value, min, max, unit, warningThreshold, criticalThreshold,
+  label, value, min, max, unit, warningThreshold, criticalThreshold, direction = 'high',
 }) => {
   const radius = 40;
   const circumference = Math.PI * radius;
   const clamped = Math.min(Math.max(value, min), max);
   const ratio = (clamped - min) / (max - min);
   const offset = circumference * (1 - ratio);
-  const color = getArcColor(value, warningThreshold, criticalThreshold);
+  const color = getArcColor(value, warningThreshold, criticalThreshold, direction);
 
   return (
     <div className="flex flex-col items-center p-2">

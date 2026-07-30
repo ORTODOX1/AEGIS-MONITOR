@@ -19,6 +19,18 @@ export interface SensorReading {
   timestamp: number;
 }
 
+/** Frame pushed over WebSocket by the mock data server in `server/index.ts`. */
+export interface LiveSnapshot {
+  timestamp: number;
+  engineRpm: number;
+  oilPressureKpa: number;
+  coolantTempC: number;
+  fuelRateLph: number;
+  exhaustTempC: number;
+  speedKnots: number;
+  shaftPowerKw: number;
+}
+
 export interface EngineData {
   rpm: number;
   oilPressureKpa: number;

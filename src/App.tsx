@@ -1,194 +1,285 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import Header from './components/Header';
+import SystemSidebar from './components/SystemSidebar';
+import GaugeWidget from './components/GaugeWidget';
+import ShipModel from './components/ShipModel';
+import TrendChart from './components/TrendChart';
+import AlarmPanel from './components/AlarmPanel';
+import VoyagePerformance from './components/VoyagePerformance';
+import { useWebSocket } from './hooks/useWebSocket';
+import { useVesselStore } from './store/useVesselStore';
+import type {
+  AlarmSeverity,
+  LiveSnapshot,
+  SensorReading,
+  SystemName,
+  SystemStatus,
+} from './types/sensor';
 
-interface SystemItem {
-  id: string;
-  label: string;
-  status: "normal" | "warning" | "critical";
-}
+const VESSEL_NAME = import.meta.env.VITE_VESSEL_NAME ?? 'M/V AEGIS PIONEER';
+const WS_URL =
+  import.meta.env.VITE_WS_URL ?? `ws://${window.location.hostname}:3001/ws`;
 
-interface GaugeProps {
+/** Rolling window kept in memory; nothing is persisted between reloads. */
+const HISTORY_LIMIT = 300;
+
+/** Marine diesel oil, used to convert volumetric fuel flow into mass flow. */
+const FUEL_DENSITY_G_PER_L = 980;
+
+type Direction = 'high' | 'low';
+
+interface Channel {
+  key: Exclude<keyof LiveSnapshot, 'timestamp'>;
   label: string;
-  value: number;
   unit: string;
   min: number;
   max: number;
-  status: "normal" | "warning" | "critical";
+  warning: number;
+  critical: number;
+  direction: Direction;
+  /** J1939 PGN when the bundled decoder covers this parameter, 0 otherwise. */
+  pgn: number;
 }
 
-const VESSEL_NAME = "M/V AEGIS PIONEER";
-
-const SYSTEMS: SystemItem[] = [
-  { id: "me", label: "Main Engine", status: "normal" },
-  { id: "dg1", label: "Diesel Generator No.1", status: "normal" },
-  { id: "dg2", label: "Diesel Generator No.2", status: "warning" },
-  { id: "dg3", label: "Diesel Generator No.3", status: "normal" },
-  { id: "boiler", label: "Auxiliary Boiler", status: "normal" },
-  { id: "comp", label: "Air Compressors", status: "normal" },
-  { id: "purifier", label: "FO/LO Purifiers", status: "normal" },
-  { id: "cooling", label: "Cooling Water System", status: "normal" },
-  { id: "steering", label: "Steering Gear", status: "normal" },
-  { id: "bilge", label: "Bilge & Ballast", status: "critical" },
+const CHANNELS: Channel[] = [
+  { key: 'engineRpm', label: 'ME Speed', unit: 'rpm', min: 0, max: 130, warning: 112, critical: 120, direction: 'high', pgn: 61444 },
+  { key: 'oilPressureKpa', label: 'LO Pressure', unit: 'kPa', min: 0, max: 600, warning: 350, critical: 300, direction: 'low', pgn: 65263 },
+  { key: 'coolantTempC', label: 'HT CW Temp', unit: '°C', min: 20, max: 110, warning: 84, critical: 92, direction: 'high', pgn: 65262 },
+  { key: 'exhaustTempC', label: 'Exh Gas Temp', unit: '°C', min: 100, max: 500, warning: 350, critical: 400, direction: 'high', pgn: 0 },
+  { key: 'fuelRateLph', label: 'FO Flow', unit: 'L/h', min: 0, max: 1400, warning: 1220, critical: 1300, direction: 'high', pgn: 0 },
+  { key: 'shaftPowerKw', label: 'Shaft Power', unit: 'kW', min: 0, max: 8000, warning: 6500, critical: 7000, direction: 'high', pgn: 0 },
 ];
 
-const GAUGES: GaugeProps[] = [
-  { label: "ME RPM", value: 105, unit: "rpm", min: 0, max: 130, status: "normal" },
-  { label: "ME Exhaust Temp", value: 347, unit: "\u00b0C", min: 200, max: 500, status: "normal" },
-  { label: "LO Pressure", value: 3.2, unit: "bar", min: 0, max: 6, status: "normal" },
-  { label: "CW Temp In", value: 36, unit: "\u00b0C", min: 20, max: 50, status: "normal" },
-  { label: "DG2 Load", value: 87, unit: "%", min: 0, max: 100, status: "warning" },
-  { label: "FO Flow Rate", value: 142, unit: "L/h", min: 0, max: 250, status: "normal" },
-  { label: "Bilge Well Level", value: 78, unit: "cm", min: 0, max: 100, status: "critical" },
-  { label: "Air Receiver", value: 28.5, unit: "bar", min: 0, max: 30, status: "normal" },
+const SYSTEM_NAMES: SystemName[] = [
+  'Main Engine',
+  'Generators',
+  'Pumps',
+  'Steering Gear',
+  'HVAC',
+  'Fuel System',
+  'Ballast System',
 ];
 
-const STATUS_COLORS: Record<string, string> = {
-  normal: "bg-green-500",
-  warning: "bg-amber-500",
-  critical: "bg-red-500",
-};
+function evaluate(value: number, channel: Channel): AlarmSeverity | null {
+  if (channel.direction === 'low') {
+    if (value <= channel.critical) return 'Critical';
+    if (value <= channel.warning) return 'Warning';
+    return null;
+  }
+  if (value >= channel.critical) return 'Critical';
+  if (value >= channel.warning) return 'Warning';
+  return null;
+}
 
-const STATUS_BORDER: Record<string, string> = {
-  normal: "border-green-700",
-  warning: "border-amber-600",
-  critical: "border-red-600",
-};
+/** Trapezoidal integration of a per-hour rate over the buffered samples. */
+function integrate(history: LiveSnapshot[], pick: (s: LiveSnapshot) => number): number {
+  let total = 0;
+  for (let i = 1; i < history.length; i += 1) {
+    const prev = history[i - 1];
+    const current = history[i];
+    const hours = (current.timestamp - prev.timestamp) / 3_600_000;
+    total += ((pick(prev) + pick(current)) / 2) * hours;
+  }
+  return total;
+}
 
-const STATUS_TEXT: Record<string, string> = {
-  normal: "text-green-400",
-  warning: "text-amber-400",
-  critical: "text-red-400",
-};
+function sfoc(snapshot: LiveSnapshot): number {
+  if (snapshot.shaftPowerKw <= 0) return 0;
+  return (snapshot.fuelRateLph * FUEL_DENSITY_G_PER_L) / snapshot.shaftPowerKw;
+}
 
-function GaugeCard({ label, value, unit, min, max, status }: GaugeProps) {
-  const pct = Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100));
+function toReadings(history: LiveSnapshot[], channel: Channel): SensorReading[] {
+  return history.map((snapshot) => ({
+    sensorId: channel.key,
+    pgn: channel.pgn,
+    value: Number(snapshot[channel.key].toFixed(2)),
+    unit: channel.unit,
+    timestamp: snapshot.timestamp,
+  }));
+}
 
+function Panel({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className={`bg-slate-800 border ${STATUS_BORDER[status]} rounded-lg p-4`}>
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-sm text-slate-400 font-medium">{label}</span>
-        <span className={`w-2 h-2 rounded-full ${STATUS_COLORS[status]}`} />
-      </div>
-      <div className="flex items-baseline gap-1 mb-3">
-        <span className={`text-3xl font-mono font-bold ${STATUS_TEXT[status]}`}>
-          {value}
-        </span>
-        <span className="text-sm text-slate-500">{unit}</span>
-      </div>
-      <div className="w-full h-2 bg-slate-700 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-all duration-500 ${STATUS_COLORS[status]}`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <div className="flex justify-between mt-1">
-        <span className="text-xs text-slate-600">{min}</span>
-        <span className="text-xs text-slate-600">{max}</span>
-      </div>
+    <section className="bg-slate-800 border border-slate-700 rounded-lg p-4">
+      <h2 className="text-sm font-semibold text-slate-200 mb-3">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
+function NoDataNotice() {
+  return (
+    <div className="bg-slate-800 border border-dashed border-slate-600 rounded-lg p-8 text-center">
+      <p className="text-slate-300 text-sm font-medium">No telemetry received yet</p>
+      <p className="text-slate-500 text-xs mt-2">
+        The dashboard renders live WebSocket frames only. Start the bundled mock data
+        server with <code className="text-sky-400">npm run server</code>, or point{' '}
+        <code className="text-sky-400">VITE_WS_URL</code> at a real gateway.
+      </p>
     </div>
   );
 }
 
-function Sidebar({
-  systems,
-  selected,
-  onSelect,
-}: {
-  systems: SystemItem[];
-  selected: string;
-  onSelect: (id: string) => void;
-}) {
-  return (
-    <aside className="w-64 bg-slate-900 border-r border-slate-700 flex flex-col">
-      <div className="p-4 border-b border-slate-700">
-        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-          Systems
-        </h2>
-      </div>
-      <nav className="flex-1 overflow-y-auto py-2">
-        {systems.map((sys) => (
-          <button
-            key={sys.id}
-            onClick={() => onSelect(sys.id)}
-            className={`w-full text-left px-4 py-2.5 flex items-center gap-3 transition-colors ${
-              selected === sys.id
-                ? "bg-slate-800 text-white"
-                : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-200"
-            }`}
-          >
-            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${STATUS_COLORS[sys.status]}`} />
-            <span className="text-sm">{sys.label}</span>
-          </button>
-        ))}
-      </nav>
-      <div className="p-4 border-t border-slate-700">
-        <div className="text-xs text-slate-500">
-          Active Alarms: <span className="text-red-400 font-bold">2</span>
-        </div>
-      </div>
-    </aside>
-  );
-}
-
-function Header() {
-  const now = new Date().toLocaleTimeString("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-
-  return (
-    <header className="h-14 bg-slate-900 border-b border-slate-700 flex items-center justify-between px-6">
-      <div className="flex items-center gap-4">
-        <h1 className="text-lg font-bold text-white tracking-wide">{VESSEL_NAME}</h1>
-        <span className="text-xs text-slate-500 border-l border-slate-700 pl-4">
-          AEGIS-MONITOR v0.1
-        </span>
-      </div>
-      <div className="flex items-center gap-6">
-        <span className="text-sm text-slate-400 font-mono">{now}</span>
-        <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-          <span className="text-xs text-green-400">CONNECTED</span>
-        </div>
-      </div>
-    </header>
-  );
-}
-
 export default function App() {
-  const [selectedSystem, setSelectedSystem] = useState("me");
+  const [activeTab, setActiveTab] = useState('Overview');
+  const [history, setHistory] = useState<LiveSnapshot[]>([]);
+  const lastSeverity = useRef<Record<string, AlarmSeverity | null>>({});
+
+  const selectedSystem = useVesselStore((s) => s.selectedSystem);
+  const selectSystem = useVesselStore((s) => s.selectSystem);
+  const alarms = useVesselStore((s) => s.alarms);
+  const addAlarm = useVesselStore((s) => s.addAlarm);
+  const acknowledgeAlarm = useVesselStore((s) => s.acknowledgeAlarm);
+  const setConnectionStatus = useVesselStore((s) => s.setConnectionStatus);
+
+  const { lastMessage, status } = useWebSocket<LiveSnapshot>({ url: WS_URL });
+
+  useEffect(() => {
+    setConnectionStatus(status);
+  }, [status, setConnectionStatus]);
+
+  useEffect(() => {
+    if (!lastMessage) return;
+
+    setHistory((prev) => [...prev, lastMessage].slice(-HISTORY_LIMIT));
+
+    for (const channel of CHANNELS) {
+      const severity = evaluate(lastMessage[channel.key], channel);
+      if (severity && severity !== lastSeverity.current[channel.key]) {
+        addAlarm({
+          id: `${channel.key}-${lastMessage.timestamp}`,
+          severity,
+          message: `${channel.label} ${lastMessage[channel.key].toFixed(1)} ${channel.unit}`,
+          source: 'Main Engine',
+          timestamp: lastMessage.timestamp,
+          acknowledged: false,
+        });
+      }
+      lastSeverity.current[channel.key] = severity;
+    }
+  }, [lastMessage, addAlarm]);
+
+  const latest = history.length > 0 ? history[history.length - 1] : null;
+
+  const systems = useMemo<SystemStatus[]>(
+    () =>
+      SYSTEM_NAMES.map((name) => ({
+        name,
+        // The mock gateway only streams main engine telemetry; the rest have no source.
+        state: name === 'Main Engine' && latest ? 'Running' : 'Offline',
+        activeSensors: name === 'Main Engine' && latest ? CHANNELS.length : 0,
+        activeAlarms: alarms.filter((a) => a.source === name && !a.acknowledged).length,
+      })),
+    [alarms, latest],
+  );
+
+  const voyage = useMemo(() => {
+    if (history.length === 0) {
+      return { current: 0, average: 0, fuel: 0, distance: 0 };
+    }
+    const values = history.map(sfoc).filter((v) => v > 0);
+    return {
+      current: sfoc(history[history.length - 1]),
+      average: values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0,
+      fuel: integrate(history, (s) => s.fuelRateLph),
+      distance: integrate(history, (s) => s.speedKnots),
+    };
+  }, [history]);
+
+  const fuelData = useMemo(
+    () =>
+      history.map((s) => ({
+        timestamp: s.timestamp,
+        consumptionLph: Number(s.fuelRateLph.toFixed(1)),
+        speedKnots: Number(s.speedKnots.toFixed(2)),
+      })),
+    [history],
+  );
 
   return (
     <div className="h-screen w-screen flex flex-col bg-slate-950 text-white">
-      <Header />
+      <Header
+        vesselName={VESSEL_NAME}
+        connectionStatus={status}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+      />
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar
-          systems={SYSTEMS}
-          selected={selectedSystem}
-          onSelect={setSelectedSystem}
+        <SystemSidebar
+          systems={systems}
+          selectedSystem={selectedSystem}
+          onSelect={selectSystem}
         />
-        <main className="flex-1 overflow-y-auto p-6">
-          <div className="mb-6">
-            <h2 className="text-xl font-semibold text-white">Engine Room Overview</h2>
-            <p className="text-sm text-slate-500 mt-1">
-              Real-time sensor readings -- last update: just now
-            </p>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {GAUGES.map((gauge) => (
-              <GaugeCard key={gauge.label} {...gauge} />
+        <main className="flex-1 overflow-y-auto p-6 flex flex-col gap-4">
+          {activeTab === 'Overview' && (
+            <>
+              {latest ? (
+                <Panel title={`Main Engine — live readings (${CHANNELS.length} channels)`}>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+                    {CHANNELS.map((channel) => (
+                      <GaugeWidget
+                        key={channel.key}
+                        label={channel.label}
+                        value={latest[channel.key]}
+                        min={channel.min}
+                        max={channel.max}
+                        unit={channel.unit}
+                        warningThreshold={channel.warning}
+                        criticalThreshold={channel.critical}
+                        direction={channel.direction}
+                      />
+                    ))}
+                  </div>
+                </Panel>
+              ) : (
+                <NoDataNotice />
+              )}
+
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <Panel title={`Vessel sections${selectedSystem ? ` — ${selectedSystem}` : ''}`}>
+                  <ShipModel onSystemClick={selectSystem} />
+                </Panel>
+                <Panel title="Active alarms">
+                  <AlarmPanel alarms={alarms} onAcknowledge={acknowledgeAlarm} />
+                </Panel>
+              </div>
+
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                {CHANNELS.slice(0, 2).map((channel) => (
+                  <Panel key={channel.key} title={`${channel.label} trend`}>
+                    <TrendChart
+                      data={toReadings(history, channel)}
+                      label={`${channel.label} (${channel.unit})`}
+                    />
+                  </Panel>
+                ))}
+              </div>
+            </>
+          )}
+
+          {activeTab === 'Voyage' &&
+            (latest ? (
+              <VoyagePerformance
+                fuelData={fuelData}
+                currentSfoc={voyage.current}
+                averageSfoc={voyage.average}
+                totalFuelConsumed={voyage.fuel}
+                distanceNm={voyage.distance}
+              />
+            ) : (
+              <NoDataNotice />
             ))}
-          </div>
-          <div className="mt-8 bg-slate-800 border border-slate-700 rounded-lg p-6 h-64 flex items-center justify-center">
-            <p className="text-slate-500 text-sm">
-              3D vessel cross-section will render here (Three.js / React Three Fiber)
-            </p>
-          </div>
-          <div className="mt-4 bg-slate-800 border border-slate-700 rounded-lg p-6 h-48 flex items-center justify-center">
-            <p className="text-slate-500 text-sm">
-              Time-series trend chart will render here (Recharts)
-            </p>
-          </div>
+
+          {activeTab === 'Alarms' && (
+            <Panel title="Alarm list (current session)">
+              <AlarmPanel alarms={alarms} onAcknowledge={acknowledgeAlarm} />
+              <p className="text-xs text-slate-500 mt-3">
+                Alarms are evaluated in the browser from the live threshold table and are
+                held in memory only -- they are lost on reload.
+              </p>
+            </Panel>
+          )}
         </main>
       </div>
     </div>
