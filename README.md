@@ -1,6 +1,6 @@
 # AEGIS-MONITOR -- Ship Systems Monitoring Dashboard
 
-![Status](https://img.shields.io/badge/status-in%20development-orange?style=flat-square)
+![Status](https://img.shields.io/badge/status-early%20prototype-orange?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 ![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?style=flat-square&logo=typescript&logoColor=white)
@@ -9,137 +9,163 @@
 
 ---
 
-Real-time monitoring dashboard for ship power plant and auxiliary systems. Built for bridge and engine control room displays aboard vessels of any class. AEGIS-MONITOR ingests live sensor telemetry over WebSocket, decodes industrial bus protocols (CAN J1939, NMEA 2000, Modbus TCP), and renders operational data as gauges, time-series charts, 3D cross-section overlays, and alarm panels -- giving watchkeepers immediate situational awareness of machinery health.
+A single-page dashboard for ship power plant telemetry, written by a marine engineer
+learning to build the tools he wanted in the engine room.
 
-Designed by a marine engineer, for marine engineers.
+**What it is today:** a React 19 / TypeScript front end that connects to a WebSocket,
+renders one main-engine data stream as gauges, trend charts and browser-evaluated
+alarms, and ships with a **mock data server** that generates that stream. There is no
+database, no authentication and no connection to real shipboard hardware.
+
+**What it is not:** a certified alarm and monitoring system, or a product. Everything
+under [Planned](#planned) is honest about not existing yet.
 
 ---
 
 ## Table of Contents
 
-- [Features](#features)
+- [Implemented](#implemented)
 - [Data Interfaces](#data-interfaces)
+- [Planned](#planned)
 - [Tech Stack](#tech-stack)
 - [Architecture](#architecture)
-- [Screenshots](#screenshots)
 - [Getting Started](#getting-started)
 - [Deployment](#deployment)
-- [IMO e-Navigation Compliance](#imo-e-navigation-compliance)
+- [IMO e-Navigation Notes](#imo-e-navigation-notes)
 - [Project Structure](#project-structure)
 - [About the Author](#about-the-author)
 - [License](#license)
 
 ---
 
-## Features
+## Implemented
 
-### Real-Time Sensor Visualization
-Circular gauges, bar indicators, and sparkline micro-charts update at sub-second intervals. Each sensor widget shows current value, unit, operating range, and alarm thresholds. Color-coded status (green / yellow / red) follows standard engine room conventions.
+### Live sensor gauges
+Six SVG half-arc gauges for the main engine channels carried by the incoming
+WebSocket frame: speed, lube oil pressure, HT cooling water temperature, exhaust gas
+temperature, fuel flow and shaft power. Each gauge has its own operating range and
+warning/critical thresholds, and colours the arc green / amber / red. Pressure gauges
+alarm on falling values, temperatures on rising ones.
 
-### 3D Ship Cross-Section Model
-Interactive Three.js model of the vessel's general arrangement. Click on any compartment -- engine room, auxiliary machinery space, steering gear room, cargo holds -- to drill down into the systems installed there. Sensor overlays are projected directly onto the 3D geometry, giving spatial context to numerical data.
+### Alarm panel
+Thresholds are evaluated in the browser on every received frame. Crossing a threshold
+raises an alarm with a severity, a timestamp and a source system; the duty engineer can
+acknowledge it. Severities are **Critical / Warning / Caution**, matching
+`AlarmSeverity` in `src/types/sensor.ts`. Alarms live in a Zustand store capped at 500
+entries -- they are **held in memory only and lost on reload**. There is no alarm
+history, no search and no audible annunciation.
 
-### Engine Room Overview
-Dedicated layout for the main propulsion plant: main engine cylinder pressures and exhaust temperatures, turbocharger RPM, generator load sharing, cooling water and lubricating oil circuits, fuel oil system, compressed air system, bilge and ballast pumps. Each subsystem is a self-contained widget panel.
+### Trend charts
+Recharts line charts over the rolling in-memory buffer (the last 300 frames, roughly
+five minutes at 1 Hz). Drag across the plot to zoom into a time range, then reset. No
+historical queries, no CSV export.
 
-### Alarm Management Panel
-Centralized alarm list with severity levels (Critical / Warning / Caution / Status). Alarms are timestamped, categorized by system, and support acknowledgement by the duty engineer. Alarm history is persisted and searchable. Audible alerts with configurable tones per severity.
+### Voyage performance panel
+Specific fuel oil consumption computed from the streamed fuel flow and shaft power
+(`L/h x 980 g/L / kW`), compared against the session average. Fuel burned and distance
+run are trapezoidally integrated over the buffered samples, so both are **totals since
+the dashboard connected**, not voyage totals. The weather overlay is an explicit
+placeholder.
 
-### Historical Trend Viewer
-Time-series explorer with zoom and pan controls. Overlay multiple sensor channels on a single axis. Query historical data by time range, system, or specific sensor tag. Export to CSV for shore-side reporting. Powered by TimescaleDB continuous aggregates for fast range queries over months of data.
+### 3D section view
+A React Three Fiber scene with four clickable blocks standing in for machinery spaces
+(main engine, generators, pumps, steering gear), with orbit controls. It is a
+navigation affordance and a placeholder for real geometry -- **not** a vessel general
+arrangement, and sensor values are not projected onto it.
 
-### CAN Bus Message Decoder
-Built-in parsers for J1939 and NMEA 2000 protocol frames. Raw PGN (Parameter Group Number) messages are decoded into human-readable values with correct units and scaling factors. SPN (Suspect Parameter Number) and FMI (Failure Mode Identifier) codes are resolved to plain-text descriptions per SAE J1939-73 diagnostic definitions.
+### CAN frame decoders
+Standalone, dependency-free TypeScript functions with bounds-checked buffer reads:
 
-### Voyage Performance Dashboard
-Fuel consumption rate, specific fuel oil consumption (SFOC), vessel speed over ground and through water, weather correlation (wind, sea state, current), and hull/propeller fouling trend indicators. Noon report data aggregation. Benchmarking against design-condition baselines.
+| Decoder | Coverage |
+|---|---|
+| `src/utils/j1939-decoder.ts` | PGN extraction from a 29-bit CAN ID, plus three PGNs: 61444 (engine speed, SPN 190), 65262 (coolant temperature, SPN 110), 65263 (oil pressure, SPN 100). Each result carries its SPN. **FMI is always `null`** -- diagnostic trouble codes per J1939-73 are not parsed. |
+| `src/utils/nmea-decoder.ts` | Two NMEA 2000 PGNs: 127488 (engine parameters, rapid update) and 130312 (temperature). |
 
-### Multi-Vessel Fleet View
-Shore-side operations center layout displaying fleet-wide status at a glance. Each vessel card shows position, heading, speed, main engine load, and active alarm count. Click through to any vessel's full dashboard. Designed for fleet managers and technical superintendents.
+The decoders are library code and are not yet fed by the UI, which consumes the mock
+server's JSON frames directly.
+
+### Mock data server
+`server/index.ts` is an Express + `ws` server that **generates every value it returns
+with `Math.random()`**. It exposes `/api/v1/vessels`, `.../status`, `.../history` and
+`.../alarms`, and streams a snapshot over `/ws` once per second. It reads no bus, opens
+no database and persists nothing. It exists so the dashboard has something to render.
 
 ---
 
 ## Data Interfaces
 
-| Interface | Protocol | Purpose |
+| Interface | Status | Notes |
 |---|---|---|
-| **WebSocket** | `ws://` / `wss://` | Real-time sensor streams from the shipboard data gateway. Binary or JSON frames at configurable intervals (100 ms -- 10 s). |
-| **REST API** | HTTP/HTTPS | Historical data queries, alarm log retrieval, configuration management, user authentication. |
-| **NMEA 2000 Parser** | CAN 2.0B | Built-in decoder for PGN messages per NMEA 2000 standard. Supports engine, generator, tank, and navigation PGNs. |
-| **J1939 Parser** | CAN 2.0B | SPN/FMI interpretation per SAE J1939. Covers propulsion engine, transmission, and auxiliary equipment diagnostics. |
-| **Modbus TCP Client** | TCP/IP | Direct polling of PLCs, VFDs, and other Modbus-compatible devices in the engine room automation network. Register map configuration via JSON. |
+| **WebSocket** | Working | JSON frames at 1 Hz from the mock server. Auto-reconnect with a retry cap. Point `VITE_WS_URL` at another gateway that speaks the same frame shape (`LiveSnapshot` in `src/types/sensor.ts`). |
+| **REST API** | Endpoints exist, data is generated | Typed client in `src/api/client.ts` for vessel list, status, history and alarm log. Not yet called by the dashboard. |
+| **NMEA 2000 parser** | Partial | Two PGNs, decode only. No CAN transport. |
+| **J1939 parser** | Partial | Three PGNs, SPN values only, no FMI. No CAN transport. |
+
+---
+
+## Planned
+
+Not started or not wired up. Listed so the feature list above stays honest.
+
+- **Persistence** -- TimescaleDB hypertables and continuous aggregates for sensor
+  history and a searchable alarm log. A database container is provisioned in
+  `docker-compose.yml`, but nothing connects to it and there is no schema yet.
+- **Authentication** -- no user model, no sessions, no access control of any kind.
+- **Real acquisition layer** -- a gateway process that actually reads CAN and feeds the
+  decoders, replacing the mock generator.
+- **Modbus TCP** -- polling PLCs and VFDs in the automation network. No client exists.
+- **Multi-vessel fleet view** -- shore-side aggregation. No components exist.
+- **Historical queries and CSV export** -- currently the charts only see the in-memory
+  buffer.
+- **Audible alarm annunciation** and per-severity tones.
 
 ---
 
 ## Tech Stack
 
 ### Frontend
-- **React 19** -- component architecture, concurrent features
-- **TypeScript 5** -- strict type safety across the entire codebase
-- **Tailwind CSS 4** -- utility-first styling, dark theme by default
-- **Three.js / React Three Fiber** -- 3D vessel model rendering
-- **Recharts / D3.js** -- time-series charts, gauges, sparklines
-- **Zustand** -- lightweight global state management
+- **React 19** + **TypeScript 5** (strict)
+- **Tailwind CSS 4** via `@tailwindcss/vite` -- dark theme
+- **Three.js / React Three Fiber / drei** -- 3D section view
+- **Recharts** -- trend and voyage charts
+- **Zustand** -- global state
 
-### Backend
-- **Node.js 22** -- server runtime
-- **Express** -- REST API framework
-- **ws** -- WebSocket server for real-time data relay
-- **TimescaleDB** -- time-series optimized PostgreSQL for sensor history
+### Backend (mock)
+- **Node.js 22**, **Express 5**, **ws** -- generated telemetry only
 
 ### Tooling
-- **Vite** -- build and dev server
-- **ESLint / Prettier** -- code quality
+- **Vite 6** -- build and dev server
+- **ESLint 9** (flat config) + **Prettier**
 - **Docker Compose** -- containerized deployment
+- **GitHub Actions** -- `npm ci`, lint, build on every push and PR
 
 ---
 
 ## Architecture
 
 ```
-                         Shore Network / Ship LAN
-                                  |
-                    +-------------+-------------+
-                    |                           |
-              [REST API]                  [WebSocket]
-              Port 3001                   Port 3002
-                    |                           |
-           +--------+---------+        +--------+---------+
-           |  Express Server  |        |   WS Relay Server |
-           |  (historical)    |        |   (real-time)      |
-           +--------+---------+        +--------+---------+
-                    |                           |
-                    +-------------+-------------+
-                                  |
-                          [TimescaleDB]
-                           Port 5432
+                    Browser (React SPA, Vite build)
                                   |
               +-------------------+-------------------+
-              |                   |                   |
-        [NMEA 2000         [J1939 Parser]      [Modbus TCP
-         Parser]                                 Client]
-              |                   |                   |
+              |                                       |
+        [WebSocket /ws]                        [REST /api/v1]
+        1 Hz JSON frames                       client written,
+              |                                not yet called
+              |                                       |
               +-------------------+-------------------+
                                   |
-                     Shipboard Sensor Network
-                    (CAN bus / Modbus / Serial)
+                    server/index.ts -- MOCK SERVER
+                    Express 5 + ws, port 3001
+                    every value from Math.random()
+                                  |
+                                  X
+                    no database, no CAN bus,
+                    no persistence  (see Planned)
 ```
 
-The frontend connects to both the WebSocket relay (for live data) and the REST API (for historical queries, alarm logs, configuration). The backend services decode raw industrial bus traffic into normalized JSON, persist readings to TimescaleDB, and fan out to connected dashboard clients.
-
----
-
-## Screenshots
-
-> Screenshots will be added as the UI components are completed.
-
-| View | Description |
-|---|---|
-| Engine Room Overview | Main engine, generators, and auxiliary systems at a glance |
-| 3D Cross-Section | Interactive vessel model with sensor overlays |
-| Alarm Panel | Active alarms with severity and acknowledgement controls |
-| Trend Viewer | Multi-channel time-series with zoom and pan |
-| Fleet View | Shore-side multi-vessel operations dashboard |
+In the browser, `useWebSocket` feeds a rolling buffer in `App.tsx`; thresholds are
+evaluated per frame and raised alarms land in the Zustand store that the alarm panel
+and the system sidebar read from.
 
 ---
 
@@ -147,14 +173,13 @@ The frontend connects to both the WebSocket relay (for live data) and the REST A
 
 ### Prerequisites
 
-- Node.js >= 22
-- Docker and Docker Compose (for TimescaleDB)
-- npm >= 10
+- Node.js >= 22, npm >= 10
+- Docker and Docker Compose (optional, only for the container workflow)
 
 ### Installation
 
 ```bash
-git clone https://github.com/anthropic-maritime/AEGIS-MONITOR.git
+git clone https://github.com/hermandoronin/AEGIS-MONITOR.git
 cd AEGIS-MONITOR
 npm install
 ```
@@ -162,77 +187,75 @@ npm install
 ### Development
 
 ```bash
-# Start TimescaleDB
-docker compose up -d timescaledb
-
-# Start the backend API and WebSocket server
-npm run server
-
-# Start the frontend dev server
-npm run dev
+cp .env.example .env      # optional, sensible defaults are built in
+npm run server            # mock data server on :3001
+npm run dev               # dashboard on :5173
 ```
 
-The dashboard will be available at `http://localhost:5173`.
+The dashboard is at `http://localhost:5173`. Without the mock server running it
+renders, reports `DISCONNECTED` and tells you no telemetry has arrived -- it never
+fabricates readings in the browser.
+
+Other scripts: `npm run build` (`tsc -b` then `vite build`), `npm run lint`,
+`npm run preview`, `npm run format`.
 
 ### Environment Variables
 
-Create a `.env` file in the project root:
+All optional; see [`.env.example`](.env.example).
 
-```env
-# Database
-TIMESCALE_HOST=localhost
-TIMESCALE_PORT=5432
-TIMESCALE_DB=aegis
-TIMESCALE_USER=aegis
-TIMESCALE_PASSWORD=<your-password>
+| Variable | Default | Used by |
+|---|---|---|
+| `PORT` | `3001` | mock server |
+| `VITE_WS_URL` | `ws://<host>:3001/ws` | dashboard |
+| `VITE_VESSEL_NAME` | `M/V AEGIS PIONEER` | dashboard header |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | -- | `docker compose` database container only |
 
-# WebSocket
-WS_PORT=3002
-
-# API
-API_PORT=3001
-
-# Ship identity
-VESSEL_NAME=M/V AEGIS PIONEER
-VESSEL_IMO=9876543
-```
+`docker compose` will refuse to start unless `POSTGRES_PASSWORD` is set.
 
 ---
 
 ## Deployment
 
-Production deployment uses Docker Compose to orchestrate three services:
-
 ```bash
-docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-### Services
-
-| Service | Image | Port | Description |
+| Service | Build file | Port | Description |
 |---|---|---|---|
-| `dashboard` | `aegis-monitor/dashboard` | 80 | Nginx serving the built React app |
-| `api` | `aegis-monitor/api` | 3001 | Express REST API + WebSocket relay |
-| `timescaledb` | `timescale/timescaledb` | 5432 | TimescaleDB with continuous aggregates |
+| `frontend` | `Dockerfile` | 80 | Nginx serving the built React app with SPA fallback |
+| `backend` | `Dockerfile.server` | 3001 | Mock data server (Express + WebSocket) |
 
-### Hardware Recommendations
+The development compose file (`docker-compose.yml`) additionally starts a
+`timescale/timescaledb` container. It is provisioned for the planned persistence layer
+and is not used by any code in this repository yet.
 
-- **Bridge / ECR display**: Any modern x86 or ARM device with a browser. Chromium-based browsers recommended for WebGL performance.
-- **Shipboard server**: Fanless industrial PC, 8 GB RAM minimum. SSD storage for TimescaleDB.
-- **Shore-side**: Standard server or cloud VM for fleet view aggregation.
+### Hardware Notes
+
+- **Bridge / ECR display**: any modern x86 or ARM device with a browser; Chromium-based
+  browsers give the best WebGL performance for the 3D view.
+- **Shipboard server**: a fanless industrial PC is more than enough for the current
+  Node process.
 
 ---
 
-## IMO e-Navigation Compliance
+## IMO e-Navigation Notes
 
-AEGIS-MONITOR is designed with awareness of the IMO e-Navigation strategy and relevant guidelines:
+This is a hobby project, not a certified system, and it claims no compliance. These are
+the references that shaped the design:
 
-- **MSC.1/Circ.1512** -- Guideline on Software Quality Assurance and Human-Centred Design for e-Navigation. The dashboard follows human-centred design principles: high-contrast color schemes for bridge use, minimal cognitive load layouts, consistent alarm presentation.
-- **IEC 62923** -- Maritime navigation and radiocommunication equipment -- Bridge alert management. The alarm panel implements alert categories (Emergency, Alarm, Warning, Caution) consistent with IEC 62923 definitions.
-- **IEC 61162-450** -- Maritime digital interfaces. Data models are aligned with IEC 61162-450 lightweight Ethernet sentence structures where applicable.
-- **Class society requirements** -- Alarm and monitoring system outputs are structured to support documentation requirements from DNV, Lloyd's Register, Bureau Veritas, and other classification societies.
+- **MSC.1/Circ.1512** -- software quality assurance and human-centred design for
+  e-Navigation. The influence here is the visual language: high contrast for bridge and
+  ECR lighting, dense but low-clutter layouts, one consistent colour code for status.
+- **IEC 62923** -- bridge alert management. The alarm panel currently uses three
+  severities (Critical / Warning / Caution), which is a **subset** of the IEC 62923
+  category set (Emergency / Alarm / Warning / Caution) and does not implement its
+  escalation, silencing or responsibility-transfer behaviour.
+- **IEC 61162-450** -- maritime digital interfaces. Referenced while shaping the sensor
+  data model; no 61162-450 transport is implemented.
 
-> Note: AEGIS-MONITOR is a visualization and monitoring tool. It does not replace certified alarm and monitoring systems (AMS) required by SOLAS Chapter II-1 Regulation 48-56. It is intended as a supplementary decision-support tool.
+> AEGIS-MONITOR is a visualization experiment. It does not replace, and must not be
+> relied on in place of, the certified alarm and monitoring system required by SOLAS
+> Chapter II-1.
 
 ---
 
@@ -240,59 +263,58 @@ AEGIS-MONITOR is designed with awareness of the IMO e-Navigation strategy and re
 
 ```
 AEGIS-MONITOR/
+  .github/workflows/ci.yml   -- npm ci, lint, build
+  public/
+    favicon.svg
+  server/
+    index.ts                 -- mock Express + WebSocket server
   src/
+    api/
+      client.ts              -- typed REST client (not yet called by the UI)
     components/
-      gauges/          -- Circular gauge, bar indicator, sparkline
-      charts/          -- Time-series chart, trend viewer
-      alarms/          -- Alarm panel, alarm card, alarm history
-      model3d/         -- Three.js vessel cross-section
-      fleet/           -- Multi-vessel fleet view components
-      layout/          -- Header, sidebar, main content area
-    services/
-      websocket.ts     -- WebSocket client manager
-      api.ts           -- REST API client
-      parsers/
-        nmea2000.ts    -- NMEA 2000 PGN decoder
-        j1939.ts       -- J1939 SPN/FMI decoder
-        modbus.ts      -- Modbus TCP register reader
-    stores/
-      sensorStore.ts   -- Zustand store for live sensor state
-      alarmStore.ts    -- Zustand store for alarm management
-      vesselStore.ts   -- Zustand store for vessel metadata
+      AlarmPanel.tsx
+      GaugeWidget.tsx
+      Header.tsx
+      ShipModel.tsx
+      SystemSidebar.tsx
+      TrendChart.tsx
+      VoyagePerformance.tsx
+    hooks/
+      useAlarms.ts           -- standalone alarm-state hook
+      useWebSocket.ts        -- reconnecting WebSocket client
+    store/
+      useVesselStore.ts      -- Zustand store (connection, alarms, selection)
     types/
-      sensor.ts        -- Sensor data type definitions
-      alarm.ts         -- Alarm type definitions
-      vessel.ts        -- Vessel and fleet type definitions
-      protocol.ts      -- Protocol message type definitions
+      sensor.ts              -- shared sensor, alarm and system types
+    utils/
+      formatters.ts
+      j1939-decoder.ts
+      nmea-decoder.ts
     App.tsx
     main.tsx
-  server/
-    index.ts           -- Express + WebSocket server entry point
-    routes/
-      sensors.ts       -- Historical sensor data endpoints
-      alarms.ts        -- Alarm log endpoints
-      vessels.ts       -- Vessel registry endpoints
-    decoders/
-      nmea2000.ts      -- Server-side NMEA 2000 decoder
-      j1939.ts         -- Server-side J1939 decoder
-      modbus.ts        -- Modbus TCP polling service
-    db/
-      schema.sql       -- TimescaleDB hypertable definitions
-      migrations/      -- Database migration scripts
+    index.css
+    vite-env.d.ts
+  .env.example
+  Dockerfile                 -- frontend build + nginx
+  Dockerfile.server          -- mock server
   docker-compose.yml
   docker-compose.prod.yml
+  eslint.config.js
+  index.html
   package.json
-  tsconfig.json
+  tsconfig.json / tsconfig.app.json / tsconfig.node.json
   vite.config.ts
-  tailwind.config.ts
-  README.md
 ```
 
 ---
 
 ## About the Author
 
-Marine engineer building the tools I wish I had in the engine room. Years of watchkeeping aboard vessels -- from general cargo ships to modern cruise liners -- made it clear that the gap between raw machinery data and actionable insight is where software should live. AEGIS-MONITOR is part of a broader effort to bring modern web technology to maritime engineering operations, where reliable real-time visualization can make the difference between a routine watch and an emergency.
+Marine engineer, currently learning software by building the tools I wished I had on
+watch. Years of watchkeeping -- general cargo ships through to cruise liners -- made
+the gap between raw machinery data and an actionable picture very obvious. This
+repository is where I work on closing it. It is early, and the README above is
+deliberately blunt about how early.
 
 ---
 
